@@ -11,6 +11,7 @@ const {
 } = require('../utils/baileys');
 
 const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || '0.0.0.0';
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const JSON_LIMIT = process.env.JSON_LIMIT || '25mb';
 
@@ -170,8 +171,8 @@ app.use((error, req, res, next) => {
 async function start() {
   await whatsapp.start();
 
-  app.listen(PORT, () => {
-    log(`HTTP server listening on port ${PORT}`);
+  app.listen(PORT, HOST, () => {
+    log(`HTTP server listening on ${HOST}:${PORT}`);
   });
 }
 
