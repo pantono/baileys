@@ -1,0 +1,33 @@
+{
+  "name": "baileys-rest-service",
+  "version": "1.0.0",
+  "description": "Stable REST API service for WhatsApp messaging using @whiskeysockets/baileys",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "baileys",
+    "express",
+    "webhook"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.10",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "pino": "^9.6.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}
