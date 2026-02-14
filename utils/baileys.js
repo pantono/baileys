@@ -394,6 +394,29 @@ function createWhatsAppService({ dataDir, log }) {
         pushEvent('message-receipt.update', receipt);
       }
     });
+
+    // Forward additional Baileys domain events to the same event/webhook pipeline.
+    const passthroughEvents = [
+      'presence.update',
+      'messaging-history.set',
+      'groups.upsert',
+      'groups.update',
+      'group-participants.update',
+      'group.join-request',
+      'group.member-tag.update',
+      'labels.edit',
+      'labels.association',
+      'lid-mapping.update',
+      'settings.update',
+      'messages.media-update',
+    ];
+
+    for (const eventName of passthroughEvents) {
+      socket.ev.on(eventName, (payload) => {
+        log(`Event received: ${eventName}`);
+        pushEvent(eventName, payload);
+      });
+    }
   }
 
   async function ensureConnected() {

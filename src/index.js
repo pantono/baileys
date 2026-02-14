@@ -14,6 +14,7 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const JSON_LIMIT = process.env.JSON_LIMIT || '25mb';
+const API_KEY = process.env.API_KEY || '';
 
 // API layer only: all WhatsApp socket behavior is encapsulated in utils/baileys.js
 const app = express();
@@ -29,6 +30,35 @@ function log(message, extra) {
 }
 
 const whatsapp = createWhatsAppService({ dataDir: DATA_DIR, log });
+
+function getApiKeyFromRequest(req) {
+  const headerKey = req.header('x-api-key');
+  if (headerKey) {
+    return headerKey.trim();
+  }
+
+  const auth = req.header('authorization') || '';
+  const [scheme, token] = auth.split(' ');
+  if (scheme && token && scheme.toLowerCase() === 'bearer') {
+    return token.trim();
+  }
+
+  return '';
+}
+
+// Protect all API routes with a shared API key.
+app.use((req, res, next) => {
+  const providedKey = getApiKeyFromRequest(req);
+  if (!API_KEY || providedKey !== API_KEY) {
+    res.status(401).json({
+      ok: false,
+      message: 'Unauthorized',
+    });
+    return;
+  }
+
+  next();
+});
 
 app.get('/health', async (req, res) => {
   const state = whatsapp.getState();
