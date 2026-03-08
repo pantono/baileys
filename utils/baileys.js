@@ -19,6 +19,7 @@ const WEBHOOK_RETRY_MAX_MS = Number(process.env.WEBHOOK_RETRY_MAX_MS || 30000);
 const EVENT_RETENTION = Number(process.env.EVENT_RETENTION || 2000);
 const RECONNECT_BASE_MS = Number(process.env.RECONNECT_BASE_MS || 1500);
 const RECONNECT_MAX_MS = Number(process.env.RECONNECT_MAX_MS || 30000);
+const FULL_HISTORY_ON_RECONNECT = String(process.env.FULL_HISTORY_ON_RECONNECT || 'true').toLowerCase() === 'true';
 
 const AUTH_DIR_NAME = 'auth';
 const EVENTS_LOG_NAME = 'events.log';
@@ -270,14 +271,28 @@ function createWhatsAppService({ dataDir, log }) {
       await resetAuthState(dataDir, log);
     }
 
+    const isReconnectAttempt = reconnectAttempts > 0;
+    const shouldSyncFullHistory = FULL_HISTORY_ON_RECONNECT && isReconnectAttempt;
+
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
     const socketConfig = {
       auth: state,
       printQRInTerminal: true,
-      syncFullHistory: false,
+      // Request full app-state/message history when reconnecting after a disconnect.
+      syncFullHistory: shouldSyncFullHistory,
       generateHighQualityLinkPreview: true,
       browser: ['Baileys REST Service', 'Chrome', '1.0.0'],
     };
+
+    if (shouldSyncFullHistory) {
+      log('Reconnect detected: enabling full history sync for this session', {
+        reconnectAttempts,
+      });
+      pushEvent('history.resync.requested', {
+        reconnectAttempts,
+        syncFullHistory: true,
+      });
+    }
 
     try {
       const { version } = await fetchLatestBaileysVersion();
