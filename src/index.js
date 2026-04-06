@@ -3,18 +3,23 @@
 require('dotenv').config();
 
 const express = require('express');
-const path = require('path');
 const {
   createWhatsAppService,
   readEventsBetween,
   parseDateInput,
 } = require('../utils/baileys');
+const db = require('../utils/db');
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const JSON_LIMIT = process.env.JSON_LIMIT || '25mb';
 const API_KEY = process.env.API_KEY || '';
+const WHATSAPP_NUMBER = process.env.WHATSAPP_NUMBER || '';
+
+if (!WHATSAPP_NUMBER) {
+  console.error('WHATSAPP_NUMBER is required. Set it in your .env file.');
+  process.exit(1);
+}
 
 // API layer only: all WhatsApp socket behavior is encapsulated in utils/baileys.js
 const app = express();
@@ -28,8 +33,6 @@ function log(message, extra) {
   }
   console.log(`[${ts}] ${message}`);
 }
-
-const whatsapp = createWhatsAppService({ dataDir: DATA_DIR, log });
 
 function getApiKeyFromRequest(req) {
   const headerKey = req.header('x-api-key');
@@ -50,28 +53,48 @@ function getApiKeyFromRequest(req) {
 app.use((req, res, next) => {
   const providedKey = getApiKeyFromRequest(req);
   if (!API_KEY || providedKey !== API_KEY) {
-    res.status(401).json({
-      ok: false,
-      message: 'Unauthorized',
-    });
+    res.status(401).json({ ok: false, message: 'Unauthorized' });
     return;
   }
-
   next();
 });
 
+// whatsapp service instance — initialised in start()
+let whatsapp = null;
+
 app.get('/health', async (req, res) => {
   const state = whatsapp.getState();
-  res.json({
-    ok: true,
+
+  let dbOk = false;
+  try {
+    await db.pingDb();
+    dbOk = true;
+  } catch (_) {
+    // db unavailable — reported in response
+  }
+
+  const mem = process.memoryUsage();
+  const ok = dbOk && !state.dead;
+
+  res.status(ok ? 200 : 503).json({
+    ok,
     service: 'baileys-rest-service',
     now: new Date().toISOString(),
     whatsapp: {
       connected: state.connected,
+      dead: state.dead,
       lastDisconnectReason: state.lastDisconnectReason,
       reconnectAttempts: state.reconnectAttempts,
       hasQr: Boolean(state.currentQr),
       me: state.me,
+      webhookQueueSize: state.webhookQueueSize,
+      eventBufferSize: state.eventBufferSize,
+    },
+    db: { ok: dbOk },
+    memory: {
+      heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
+      heapTotalMb: Math.round(mem.heapTotal / 1024 / 1024),
+      rssMb: Math.round(mem.rss / 1024 / 1024),
     },
   });
 });
@@ -129,7 +152,7 @@ app.get('/events', async (req, res) => {
     return;
   }
 
-  const events = await readEventsBetween(DATA_DIR, startDate.value, endDate.value);
+  const events = await readEventsBetween(WHATSAPP_NUMBER, startDate.value, endDate.value);
   res.json({
     ok: true,
     count: events.length,
@@ -198,7 +221,51 @@ app.use((error, req, res, next) => {
   });
 });
 
+async function waitForDb(maxAttempts = 10, baseDelayMs = 1000) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await db.pingDb();
+      log('Database connection established');
+      return;
+    } catch (error) {
+      if (attempt === maxAttempts) {
+        throw new Error(`Database unavailable after ${maxAttempts} attempts: ${error.message}`);
+      }
+      const delay = Math.min(30000, baseDelayMs * (2 ** (attempt - 1)));
+      log(`Database unavailable (attempt ${attempt}/${maxAttempts}), retrying in ${delay}ms`, {
+        error: error.message,
+      });
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+
 async function start() {
+  await waitForDb();
+
+  // Load per-number config from DB; create row with defaults on first run.
+  let numberConfig = await db.getNumberConfig(WHATSAPP_NUMBER);
+  if (!numberConfig) {
+    log(`No config found for ${WHATSAPP_NUMBER}, creating with defaults`);
+    await db.upsertNumberConfig(WHATSAPP_NUMBER, {});
+    numberConfig = await db.getNumberConfig(WHATSAPP_NUMBER);
+  }
+
+  const config = {
+    webhookUrl:              numberConfig.webhook_url             || '',
+    webhookTimeoutMs:        numberConfig.webhook_timeout_ms,
+    webhookMaxRetries:       numberConfig.webhook_max_retries,
+    webhookRetryBaseMs:      numberConfig.webhook_retry_base_ms,
+    webhookRetryMaxMs:       numberConfig.webhook_retry_max_ms,
+    eventRetention:          numberConfig.event_retention,
+    reconnectBaseMs:         numberConfig.reconnect_base_ms,
+    reconnectMaxMs:          numberConfig.reconnect_max_ms,
+    fullHistoryOnReconnect:  Boolean(numberConfig.full_history_on_reconnect),
+  };
+
+  log(`Loaded config for ${WHATSAPP_NUMBER}`, config);
+
+  whatsapp = createWhatsAppService({ phoneNumber: WHATSAPP_NUMBER, config, log });
   await whatsapp.start();
 
   app.listen(PORT, HOST, () => {
@@ -211,14 +278,27 @@ start().catch((error) => {
   process.exit(1);
 });
 
+async function shutdown() {
+  if (whatsapp) await whatsapp.stop();
+  await db.closePool();
+}
+
 process.on('SIGINT', async () => {
   log('SIGINT received, shutting down');
-  await whatsapp.stop();
+  setTimeout(() => {
+    log('Shutdown timed out, forcing exit');
+    process.exit(1);
+  }, 10_000).unref();
+  await shutdown();
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   log('SIGTERM received, shutting down');
-  await whatsapp.stop();
+  setTimeout(() => {
+    log('Shutdown timed out, forcing exit');
+    process.exit(1);
+  }, 10_000).unref();
+  await shutdown();
   process.exit(0);
 });

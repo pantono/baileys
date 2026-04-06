@@ -1,35 +1,17 @@
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
 const qrcode = require('qrcode');
 const makeWASocket = require('@whiskeysockets/baileys').default;
 const {
   DisconnectReason,
   fetchLatestBaileysVersion,
-  useMultiFileAuthState,
 } = require('@whiskeysockets/baileys');
-
-const WEBHOOK_URL = process.env.WEBHOOK_URL || '';
-const WEBHOOK_TIMEOUT_MS = Number(process.env.WEBHOOK_TIMEOUT_MS || 8000);
-const WEBHOOK_MAX_RETRIES = Number(process.env.WEBHOOK_MAX_RETRIES || 8);
-const WEBHOOK_RETRY_BASE_MS = Number(process.env.WEBHOOK_RETRY_BASE_MS || 1000);
-const WEBHOOK_RETRY_MAX_MS = Number(process.env.WEBHOOK_RETRY_MAX_MS || 30000);
-const EVENT_RETENTION = Number(process.env.EVENT_RETENTION || 2000);
-const RECONNECT_BASE_MS = Number(process.env.RECONNECT_BASE_MS || 1500);
-const RECONNECT_MAX_MS = Number(process.env.RECONNECT_MAX_MS || 30000);
-const FULL_HISTORY_ON_RECONNECT = String(process.env.FULL_HISTORY_ON_RECONNECT || 'true').toLowerCase() === 'true';
-
-const AUTH_DIR_NAME = 'auth';
-const EVENTS_LOG_NAME = 'events.log';
+const db = require('./db');
+const { useMySQLAuthState } = require('./auth');
 
 function now() {
   return new Date().toISOString();
-}
-
-function ensureDir(targetDir) {
-  fs.mkdirSync(targetDir, { recursive: true });
 }
 
 function toSafeError(error) {
@@ -66,61 +48,6 @@ async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function appendEvent(dataDir, event, log) {
-  try {
-    const line = `${JSON.stringify(event)}\n`;
-    fs.appendFileSync(path.join(dataDir, EVENTS_LOG_NAME), line, 'utf8');
-  } catch (error) {
-    log('Failed to append event log', toSafeError(error));
-  }
-}
-
-async function readEventsBetween(dataDir, startDate, endDate) {
-  const eventFile = path.join(dataDir, EVENTS_LOG_NAME);
-  if (!fs.existsSync(eventFile)) {
-    return [];
-  }
-
-  const rows = fs.readFileSync(eventFile, 'utf8').split('\n').filter(Boolean);
-  const events = [];
-
-  for (const row of rows) {
-    try {
-      const parsed = JSON.parse(row);
-      const ts = new Date(parsed.timestamp);
-      if (Number.isNaN(ts.getTime())) {
-        continue;
-      }
-      if (ts >= startDate && ts <= endDate) {
-        events.push(parsed);
-      }
-    } catch (error) {
-      // Ignore corrupt lines so one bad row does not break the API.
-    }
-  }
-
-  return events;
-}
-
-async function resetAuthState(dataDir, log) {
-  const authDir = path.join(dataDir, AUTH_DIR_NAME);
-  ensureDir(authDir);
-
-  for (const entry of fs.readdirSync(authDir)) {
-    const fullPath = path.join(authDir, entry);
-    const stat = fs.statSync(fullPath);
-
-    if (stat.isDirectory()) {
-      fs.rmSync(fullPath, { recursive: true, force: true });
-      continue;
-    }
-
-    fs.unlinkSync(fullPath);
-  }
-
-  log('Auth state reset completed', { authDir });
-}
-
 function normalizeTarget(target) {
   if (!target || typeof target !== 'string') {
     const error = new Error('target is required and must be a WhatsApp JID string.');
@@ -137,15 +64,44 @@ function throwBadRequest(message) {
   throw error;
 }
 
-function makeWebhookDispatcher(log) {
+async function readEventsBetween(phoneNumber, startDate, endDate) {
+  return db.queryEventsBetween(phoneNumber, startDate, endDate);
+}
+
+const MAX_WEBHOOK_QUEUE_SIZE = 500;
+const MAX_RECONNECT_ATTEMPTS = 20;
+
+function makeWebhookDispatcher(config, log, db, phoneNumber) {
+  const {
+    webhookUrl,
+    webhookTimeoutMs,
+    webhookMaxRetries,
+    webhookRetryBaseMs,
+    webhookRetryMaxMs,
+  } = config;
+
   const queue = [];
   let running = false;
 
-  // Single-flight retry queue with exponential backoff keeps webhook delivery
-  // ordered and resilient against transient downstream failures.
+  async function init() {
+    if (!webhookUrl) return;
+    try {
+      const items = await db.loadPendingWebhookItems(phoneNumber);
+      for (const item of items) {
+        queue.push({ ...item, url: webhookUrl });
+      }
+      if (queue.length > 0) {
+        log(`Loaded ${queue.length} pending webhook items from DB`);
+        void run();
+      }
+    } catch (error) {
+      log('Failed to load pending webhook items from DB', toSafeError(error));
+    }
+  }
+
   async function postJson(url, payload) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(), webhookTimeoutMs);
 
     try {
       const response = await fetch(url, {
@@ -175,19 +131,35 @@ function makeWebhookDispatcher(log) {
       const item = queue[0];
       try {
         await postJson(item.url, item.payload);
+        if (item.dbId != null) {
+          db.deleteWebhookQueueItem(item.dbId).catch((error) => {
+            log('Failed to delete delivered webhook queue item from DB', toSafeError(error));
+          });
+        }
         queue.shift();
       } catch (error) {
         item.attempt += 1;
-        if (item.attempt > WEBHOOK_MAX_RETRIES) {
+        if (item.attempt > webhookMaxRetries) {
           log('Webhook dropped after max retries', {
             eventType: item.payload?.eventType,
             error: toSafeError(error),
           });
+          if (item.dbId != null) {
+            db.deleteWebhookQueueItem(item.dbId).catch((err) => {
+              log('Failed to delete dropped webhook queue item from DB', toSafeError(err));
+            });
+          }
           queue.shift();
           continue;
         }
 
-        const delay = backoffMs(item.attempt, WEBHOOK_RETRY_BASE_MS, WEBHOOK_RETRY_MAX_MS);
+        const delay = backoffMs(item.attempt, webhookRetryBaseMs, webhookRetryMaxMs);
+        if (item.dbId != null) {
+          const nextRetryAt = new Date(Date.now() + delay).toISOString();
+          db.updateWebhookQueueItem(item.dbId, item.attempt, nextRetryAt).catch((err) => {
+            log('Failed to update webhook queue item in DB', toSafeError(err));
+          });
+        }
         log('Webhook failed, retrying', {
           attempt: item.attempt,
           delayMs: delay,
@@ -202,39 +174,69 @@ function makeWebhookDispatcher(log) {
   }
 
   function enqueue(payload) {
-    if (!WEBHOOK_URL) {
+    if (!webhookUrl) {
       return;
     }
 
-    queue.push({
-      url: WEBHOOK_URL,
-      payload,
-      attempt: 0,
-      enqueuedAt: now(),
-    });
+    if (queue.length >= MAX_WEBHOOK_QUEUE_SIZE) {
+      const evicted = queue.shift();
+      log('Webhook queue full, evicting oldest item', { eventType: evicted.payload?.eventType });
+      if (evicted.dbId != null) {
+        db.deleteWebhookQueueItem(evicted.dbId).catch((error) => {
+          log('Failed to evict webhook queue item from DB', toSafeError(error));
+        });
+      }
+    }
 
-    void run();
+    const enqueuedAt = now();
+    db.insertWebhookQueueItem(phoneNumber, payload, enqueuedAt)
+      .then((dbId) => {
+        queue.push({ dbId, url: webhookUrl, payload, attempt: 0, enqueuedAt });
+        void run();
+      })
+      .catch((error) => {
+        log('Failed to persist webhook item to DB, enqueuing in-memory only', toSafeError(error));
+        queue.push({ dbId: null, url: webhookUrl, payload, attempt: 0, enqueuedAt });
+        void run();
+      });
   }
 
   return {
     enqueue,
+    init,
     getQueueSize: () => queue.length,
   };
 }
 
-function createWhatsAppService({ dataDir, log }) {
-  // Data layout:
-  // - /data/auth/*       : Baileys multi-file auth state
-  // - /data/events.log   : JSONL event stream for diagnostics + /events API
-  ensureDir(dataDir);
+/**
+ * @param {object} options
+ * @param {string} options.phoneNumber   - WhatsApp number identifying this instance
+ * @param {object} options.config        - Per-number config loaded from wa_numbers table
+ * @param {Function} options.log
+ */
+function createWhatsAppService({ phoneNumber, config, log }) {
+  const {
+    webhookUrl,
+    webhookTimeoutMs,
+    webhookMaxRetries,
+    webhookRetryBaseMs,
+    webhookRetryMaxMs,
+    eventRetention,
+    reconnectBaseMs,
+    reconnectMaxMs,
+    fullHistoryOnReconnect,
+  } = config;
 
-  const authDir = path.join(dataDir, AUTH_DIR_NAME);
-  ensureDir(authDir);
-
-  const webhook = makeWebhookDispatcher(log);
+  const webhook = makeWebhookDispatcher(
+    { webhookUrl, webhookTimeoutMs, webhookMaxRetries, webhookRetryBaseMs, webhookRetryMaxMs },
+    log,
+    db,
+    phoneNumber
+  );
 
   let socket = null;
   let connected = false;
+  let dead = false;
   let currentQr = null;
   let currentQrDataUrl = null;
   let qrUpdatedAt = null;
@@ -253,11 +255,14 @@ function createWhatsAppService({ dataDir, log }) {
     };
 
     eventBuffer.push(event);
-    if (eventBuffer.length > EVENT_RETENTION) {
+    if (eventBuffer.length > eventRetention) {
       eventBuffer.shift();
     }
 
-    appendEvent(dataDir, event, log);
+    db.insertEvent(phoneNumber, event).catch((error) => {
+      log('Failed to insert event to DB', toSafeError(error));
+    });
+
     webhook.enqueue(event);
   }
 
@@ -268,17 +273,17 @@ function createWhatsAppService({ dataDir, log }) {
     }
 
     if (forceNewLogin) {
-      await resetAuthState(dataDir, log);
+      await db.deleteAuthState(phoneNumber);
+      log('Auth state reset completed', { phoneNumber });
     }
 
     const isReconnectAttempt = reconnectAttempts > 0;
-    const shouldSyncFullHistory = FULL_HISTORY_ON_RECONNECT && isReconnectAttempt;
+    const shouldSyncFullHistory = fullHistoryOnReconnect && isReconnectAttempt;
 
-    const { state, saveCreds } = await useMultiFileAuthState(authDir);
+    const { state, saveCreds } = await useMySQLAuthState(phoneNumber);
     const socketConfig = {
       auth: state,
       printQRInTerminal: true,
-      // Request full app-state/message history when reconnecting after a disconnect.
       syncFullHistory: shouldSyncFullHistory,
       generateHighQualityLinkPreview: true,
       browser: ['Baileys REST Service', 'Chrome', '1.0.0'],
@@ -298,17 +303,25 @@ function createWhatsAppService({ dataDir, log }) {
       const { version } = await fetchLatestBaileysVersion();
       socketConfig.version = version;
     } catch (error) {
-      // Continue with Baileys defaults if version lookup fails.
       log('Failed to fetch latest Baileys version, using default', toSafeError(error));
     }
 
     socket = makeWASocket(socketConfig);
 
     socket.ev.on('creds.update', async () => {
-      try {
-        await saveCreds();
-      } catch (error) {
-        log('Failed to save creds', toSafeError(error));
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await saveCreds();
+          break;
+        } catch (error) {
+          if (attempt < 3) {
+            const delay = 500 * attempt;
+            log(`Failed to save creds (attempt ${attempt}/3), retrying in ${delay}ms`, toSafeError(error));
+            await sleep(delay);
+          } else {
+            log('Failed to save creds after 3 attempts — credentials may be stale on restart', toSafeError(error));
+          }
+        }
       }
     });
 
@@ -320,9 +333,7 @@ function createWhatsAppService({ dataDir, log }) {
         qrUpdatedAt = now();
         currentQrDataUrl = await qrcode.toDataURL(qr).catch(() => null);
         log('QR updated, scan required');
-        pushEvent('auth.qr.updated', {
-          qrUpdatedAt,
-        });
+        pushEvent('auth.qr.updated', { qrUpdatedAt });
       }
 
       if (connection === 'open') {
@@ -349,18 +360,23 @@ function createWhatsAppService({ dataDir, log }) {
           shouldReconnect,
           lastDisconnect: toSafeError(lastDisconnect?.error),
         });
-        pushEvent('connection.close', {
-          statusCode,
-          shouldReconnect,
-        });
+        pushEvent('connection.close', { statusCode, shouldReconnect });
 
         if (shouldReconnect) {
           reconnectAttempts += 1;
-          const delay = backoffMs(reconnectAttempts, RECONNECT_BASE_MS, RECONNECT_MAX_MS);
-          log('Scheduling reconnect', {
-            reconnectAttempts,
-            delay,
-          });
+
+          if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+            dead = true;
+            log('Max reconnect attempts reached, service is dead. Restart required.', {
+              reconnectAttempts,
+              MAX_RECONNECT_ATTEMPTS,
+            });
+            pushEvent('connection.dead', { reconnectAttempts, MAX_RECONNECT_ATTEMPTS });
+            return;
+          }
+
+          const delay = backoffMs(reconnectAttempts, reconnectBaseMs, reconnectMaxMs);
+          log('Scheduling reconnect', { reconnectAttempts, delay });
 
           reconnectTimer = setTimeout(() => {
             void connect(false).catch((error) => {
@@ -394,11 +410,7 @@ function createWhatsAppService({ dataDir, log }) {
 
     socket.ev.on('messages.update', (updates) => {
       for (const update of updates || []) {
-        log('Message status update', {
-          key: update.key,
-          update: update.update,
-        });
-
+        log('Message status update', { key: update.key, update: update.update });
         pushEvent('messages.update', update);
       }
     });
@@ -410,7 +422,6 @@ function createWhatsAppService({ dataDir, log }) {
       }
     });
 
-    // Forward additional Baileys domain events to the same event/webhook pipeline.
     const passthroughEvents = [
       'presence.update',
       'messaging-history.set',
@@ -444,6 +455,7 @@ function createWhatsAppService({ dataDir, log }) {
 
   return {
     async start(options = {}) {
+      await webhook.init();
       await connect(Boolean(options.forceNewLogin));
       log('WhatsApp service initialized');
     },
@@ -466,6 +478,7 @@ function createWhatsAppService({ dataDir, log }) {
     getState() {
       return {
         connected,
+        dead,
         currentQr,
         currentQrDataUrl,
         qrUpdatedAt,
@@ -473,6 +486,7 @@ function createWhatsAppService({ dataDir, log }) {
         lastDisconnectReason,
         me,
         webhookQueueSize: webhook.getQueueSize(),
+        eventBufferSize: eventBuffer.length,
       };
     },
 
@@ -508,19 +522,9 @@ function createWhatsAppService({ dataDir, log }) {
         mimetype,
       });
 
-      pushEvent('send.media', {
-        jid,
-        fileName: filename,
-        mimetype,
-        messageId: sent?.key?.id,
-      });
+      pushEvent('send.media', { jid, fileName: filename, mimetype, messageId: sent?.key?.id });
 
-      return {
-        jid,
-        fileName: filename,
-        mimetype,
-        sent,
-      };
+      return { jid, fileName: filename, mimetype, sent };
     },
 
     async sendPoll({ target, pollText, pollOptions }) {
@@ -534,35 +538,18 @@ function createWhatsAppService({ dataDir, log }) {
 
       await ensureConnected();
 
-      const options = pollOptions
-        .map((option) => String(option).trim())
-        .filter(Boolean);
-
+      const options = pollOptions.map((option) => String(option).trim()).filter(Boolean);
       if (options.length < 2) {
         throwBadRequest('pollOptions must contain at least 2 non-empty options.');
       }
 
       const sent = await socket.sendMessage(jid, {
-        poll: {
-          name: pollText,
-          values: options,
-          selectableCount: 1,
-        },
+        poll: { name: pollText, values: options, selectableCount: 1 },
       });
 
-      pushEvent('send.poll', {
-        jid,
-        pollText,
-        options,
-        messageId: sent?.key?.id,
-      });
+      pushEvent('send.poll', { jid, pollText, options, messageId: sent?.key?.id });
 
-      return {
-        jid,
-        pollText,
-        options,
-        sent,
-      };
+      return { jid, pollText, options, sent };
     },
   };
 }
@@ -571,5 +558,4 @@ module.exports = {
   createWhatsAppService,
   parseDateInput,
   readEventsBetween,
-  resetAuthState,
 };
