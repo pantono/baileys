@@ -447,6 +447,7 @@ function createWhatsAppService({ phoneNumber, config, log }) {
           id: msg.key?.id,
           fromMe: msg.key?.fromMe,
           type,
+          raw_data: msg
         });
 
         pushEvent('messages.upsert', record);
