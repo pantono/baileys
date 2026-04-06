@@ -354,13 +354,29 @@ function createWhatsAppService({ phoneNumber, config, log }) {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         lastDisconnectReason = statusCode || 'unknown';
 
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+        const shouldReconnect = !isLoggedOut;
         log('WhatsApp disconnected', {
           statusCode,
           shouldReconnect,
           lastDisconnect: toSafeError(lastDisconnect?.error),
         });
         pushEvent('connection.close', { statusCode, shouldReconnect });
+
+        if (isLoggedOut) {
+          log('Session logged out (device removed or deauthorised) — clearing auth state and restarting for QR re-auth');
+          pushEvent('auth.logged_out', { statusCode });
+          reconnectAttempts = 0;
+          dead = false;
+          db.deleteAuthState(phoneNumber)
+            .catch((err) => log('Failed to clear auth state after logout', toSafeError(err)))
+            .finally(() => {
+              void connect(false).catch((error) => {
+                log('Failed to restart after logout', toSafeError(error));
+              });
+            });
+          return;
+        }
 
         if (shouldReconnect) {
           reconnectAttempts += 1;
