@@ -1,39 +1,51 @@
 # Baileys REST WhatsApp Service
 
-Node.js + Express service that wraps `@whiskeysockets/baileys` and exposes a REST API for WhatsApp messaging.
+Node.js + Express service that wraps `@whiskeysockets/baileys` and exposes a REST API for WhatsApp messaging. Auth state, event logs, and webhook queues are all persisted in MySQL.
 
 ## Features
 
-- Persistent auth state in `/data/auth`
-- Event log in `/data/events.log`
-- Incoming/status webhook delivery with retry/backoff
-- QR login support
-- REST endpoints for health, auth reset, text/media/poll sending
+- MySQL-backed auth state (credentials survive restarts)
+- Persistent event log in `wa_events` table
+- Persistent webhook delivery queue with retry/backoff (survives restarts)
+- Automatic re-auth on device removal — no manual reset required
+- Exponential backoff reconnection with configurable max attempts
+- QR login via API or terminal
+- REST endpoints for health, auth, messaging, and message deletion
 - API key protection on every endpoint
 
-## Authentication
+## Requirements
 
-Every API request must include a valid API key.
+- Node.js ≥ 18
+- MySQL 5.7+ or MariaDB 10.3+
 
-Use either:
-
-- Header: `x-api-key: <API_KEY>`
-- Header: `Authorization: Bearer <API_KEY>`
-
-If key is missing or invalid, the API returns:
-
-- `401 Unauthorized`
-- Body: `{ "ok": false, "message": "Unauthorized" }`
+See [INSTALL.md](./INSTALL.md) for database setup and table creation.
 
 ## Environment Variables
 
-See `.env.example`. Main values:
+Copy `.env.example` to `.env` and fill in the values.
 
-- `PORT` HTTP port inside the app
-- `HOST` bind host (use `0.0.0.0` in containers)
-- `API_KEY` shared API key required for all requests
-- `DATA_DIR` folder for auth + event data
-- `WEBHOOK_URL` destination URL for event callbacks
+| Variable          | Description                                           |
+|-------------------|-------------------------------------------------------|
+| `PORT`            | HTTP port (default `3000`)                            |
+| `HOST`            | Bind host (use `0.0.0.0` in containers)               |
+| `API_KEY`         | Shared secret required for all API requests           |
+| `WHATSAPP_NUMBER` | Phone number this instance manages (digits only, no `+`) |
+| `DB_HOST`         | MySQL host                                            |
+| `DB_PORT`         | MySQL port (default `3306`)                           |
+| `DB_USER`         | MySQL user                                            |
+| `DB_PASSWORD`     | MySQL password                                        |
+| `DB_NAME`         | MySQL database name                                   |
+
+Webhook URL and all per-number tuning values (timeouts, retry counts, reconnect delays) are stored in the `wa_numbers` table and loaded at startup. Update them directly in the DB and restart the service to apply.
+
+## Authentication
+
+Every API request must include a valid API key via one of:
+
+- `x-api-key: <API_KEY>`
+- `Authorization: Bearer <API_KEY>`
+
+Missing or invalid key returns `401 Unauthorized`.
 
 ## Endpoint Reference
 
@@ -41,13 +53,13 @@ Base URL example: `http://localhost:3000`
 
 All requests require API key headers.
 
+---
+
 ### `GET /health`
 
-Returns service status and WhatsApp connection state.
+Returns service status, WhatsApp connection state, DB reachability, and memory usage.
 
-Query params:
-
-- none
+Returns `200` when the DB is reachable and the service is not in a dead state. Returns `503` when the DB is down or the service has exhausted reconnect attempts.
 
 Example response:
 
@@ -57,27 +69,34 @@ Example response:
   "service": "baileys-rest-service",
   "now": "2026-02-14T18:20:00.000Z",
   "whatsapp": {
-    "connected": false,
+    "connected": true,
+    "dead": false,
     "lastDisconnectReason": null,
     "reconnectAttempts": 0,
-    "hasQr": true,
-    "me": null
+    "hasQr": false,
+    "me": { "id": "15551234567@s.whatsapp.net", "name": "My Name" },
+    "webhookQueueSize": 0,
+    "eventBufferSize": 42
+  },
+  "db": { "ok": true },
+  "memory": {
+    "heapUsedMb": 85,
+    "heapTotalMb": 120,
+    "rssMb": 145
   }
 }
 ```
 
+`dead: true` means the service has exceeded the maximum reconnect attempts and requires a process restart to recover.
+
+---
+
 ### `GET /auth/qr`
 
-Returns current QR data used for login.
+Returns the current QR code for WhatsApp login.
 
-Query params:
-
-- none
-
-Response notes:
-
-- `200` with QR payload when available
-- `404` when no active QR exists (already authenticated or not yet generated)
+- `200` with QR payload when a QR is waiting to be scanned
+- `404` when no QR is active (already authenticated, or not yet generated)
 
 Example response:
 
@@ -91,30 +110,35 @@ Example response:
 }
 ```
 
+---
+
 ### `GET /events`
 
-Returns logged events within a date range.
+Returns events from the `wa_events` table within a date range.
 
 Query params:
 
-- `start_date` (required, ISO datetime)
-- `end_date` (required, ISO datetime)
+| Param        | Required | Format                        |
+|--------------|----------|-------------------------------|
+| `start_date` | Yes      | ISO-8601, e.g. `2026-02-14T00:00:00.000Z` |
+| `end_date`   | Yes      | ISO-8601, e.g. `2026-02-14T23:59:59.999Z` |
+
+Returns `400` for missing or invalid dates, or if `start_date > end_date`.
 
 Example:
 
 ```bash
-curl "http://localhost:3000/events?start_date=2026-02-14T00:00:00.000Z&end_date=2026-02-14T23:59:59.999Z"
+curl -H "x-api-key: YOUR_KEY" \
+  "http://localhost:3000/events?start_date=2026-02-14T00:00:00.000Z&end_date=2026-02-14T23:59:59.999Z"
 ```
 
-Returns `400` for missing/invalid dates.
+---
 
 ### `POST /auth/reset`
 
-Clears auth state and forces a new login cycle.
+Clears all auth state from the DB and forces a new login cycle. A new QR code will be generated.
 
-Body:
-
-- none
+Body: none
 
 Example response:
 
@@ -125,14 +149,21 @@ Example response:
 }
 ```
 
+Note: if a linked device is removed from the host phone, the service automatically clears its auth state and restarts the QR flow — no manual reset required.
+
+---
+
 ### `POST /send/text`
 
-Send a plain text WhatsApp message.
+Send a plain text message.
 
-Body JSON:
+Body:
 
-- `target` (required): WhatsApp JID, personal or group
-- `message` (required): text body
+| Field     | Required | Type   | Description                     |
+|-----------|----------|--------|---------------------------------|
+| `target`  | Yes      | string | Recipient JID                   |
+| `message` | Yes      | string | Message text                    |
+| `replyTo` | No       | object | Quote a previous message (see [replyTo](#replyto-object)) |
 
 Example body:
 
@@ -143,20 +174,36 @@ Example body:
 }
 ```
 
-Group example target:
+With reply:
 
-- `1203630XXXXXXXXX@g.us`
+```json
+{
+  "target": "15551234567@s.whatsapp.net",
+  "message": "Got it!",
+  "replyTo": {
+    "id": "ABCDEF1234567890",
+    "fromMe": false
+  }
+}
+```
+
+Group JID format: `1203630XXXXXXXXX@g.us`
+
+---
 
 ### `POST /send/media`
 
-Send a media/document payload using base64 data.
+Send a file/document as a base64 payload.
 
-Body JSON:
+Body:
 
-- `target` (required): WhatsApp JID, personal or group
-- `base64` (required): base64 encoded file content
-- `filename` (required): output file name
-- `mimetype` (required): MIME type, e.g. `application/pdf`
+| Field      | Required | Type   | Description                             |
+|------------|----------|--------|-----------------------------------------|
+| `target`   | Yes      | string | Recipient JID                           |
+| `base64`   | Yes      | string | Base64-encoded file content             |
+| `filename` | Yes      | string | File name shown to recipient            |
+| `mimetype` | Yes      | string | MIME type, e.g. `application/pdf`       |
+| `replyTo`  | No       | object | Quote a previous message (see [replyTo](#replyto-object)) |
 
 Example body:
 
@@ -169,15 +216,20 @@ Example body:
 }
 ```
 
+---
+
 ### `POST /send/poll`
 
 Send a poll message.
 
-Body JSON:
+Body:
 
-- `target` (required): WhatsApp JID, personal or group
-- `pollText` (required): poll question text
-- `pollOptions` (required): array with at least 2 options
+| Field         | Required | Type     | Description                              |
+|---------------|----------|----------|------------------------------------------|
+| `target`      | Yes      | string   | Recipient JID                            |
+| `pollText`    | Yes      | string   | Poll question                            |
+| `pollOptions` | Yes      | string[] | At least 2 non-empty options             |
+| `replyTo`     | No       | object   | Quote a previous message (see [replyTo](#replyto-object)) |
 
 Example body:
 
@@ -189,24 +241,131 @@ Example body:
 }
 ```
 
+---
+
+### `replyTo` Object
+
+All send endpoints accept an optional `replyTo` field to quote a previous message. WhatsApp will display the quoted bubble above your new message.
+
+| Field        | Required | Type    | Description                                                             |
+|--------------|----------|---------|-------------------------------------------------------------------------|
+| `id`         | Yes      | string  | Message ID (`key.id`) of the message to quote                          |
+| `fromMe`     | No       | boolean | Whether the quoted message was sent by this account (default `false`)  |
+| `remoteJid`  | No       | string  | JID of the chat the quoted message belongs to (defaults to `target`)   |
+| `participant`| No       | string  | Sender JID — required when quoting a message in a group that isn't yours |
+| `message`    | No       | object  | Original message content object for the quoted preview bubble. If omitted, an empty preview is shown. |
+
+Minimal example (reply in a DM):
+
+```json
+{
+  "id": "ABCDEF1234567890",
+  "fromMe": false
+}
+```
+
+Group reply (quoting someone else):
+
+```json
+{
+  "id": "ABCDEF1234567890",
+  "fromMe": false,
+  "remoteJid": "1203630XXXXXXXXX@g.us",
+  "participant": "15559876543@s.whatsapp.net",
+  "message": { "conversation": "The original message text" }
+}
+```
+
+---
+
+### `POST /message/delete`
+
+Delete a message (for everyone, if permitted by WhatsApp).
+
+Body:
+
+| Field         | Required | Type    | Description                                                              |
+|---------------|----------|---------|--------------------------------------------------------------------------|
+| `target`      | Yes      | string  | JID of the chat the message belongs to                                   |
+| `messageId`   | Yes      | string  | The `key.id` of the message to delete                                    |
+| `fromMe`      | Yes      | boolean | `true` if the message was sent by this account                           |
+| `participant` | No       | string  | Sender JID — **required for group messages where `fromMe` is `false`**   |
+
+Example body:
+
+```json
+{
+  "target": "15551234567@s.whatsapp.net",
+  "messageId": "ABCDEF1234567890",
+  "fromMe": true
+}
+```
+
+Group message (not sent by you):
+
+```json
+{
+  "target": "1203630XXXXXXXXX@g.us",
+  "messageId": "ABCDEF1234567890",
+  "fromMe": false,
+  "participant": "15559876543@s.whatsapp.net"
+}
+```
+
+**Notes:**
+- Delete for everyone only works on your own messages within approximately 60 hours of sending. After that it silently becomes delete-for-me only.
+- Group admins can delete any message in their group.
+- `participant` must be provided for group messages you did not send, otherwise WhatsApp cannot locate the message.
+
+---
+
+## Webhook Events
+
+If `webhook_url` is configured in the `wa_numbers` table, the service POSTs every event as JSON to that URL. Delivery is retried with exponential backoff and persisted to the `wa_webhook_queue` table so undelivered events survive a process restart.
+
+Key event types:
+
+| Event type                  | Description                                       |
+|-----------------------------|---------------------------------------------------|
+| `connection.open`           | WhatsApp connected successfully                   |
+| `connection.close`          | Disconnected; reconnect scheduled if transient    |
+| `connection.dead`           | Max reconnect attempts exceeded; restart required |
+| `auth.qr.updated`           | New QR code available                             |
+| `auth.logged_out`           | Device removed; auth cleared, QR flow restarted   |
+| `messages.upsert`           | Incoming or sent message                          |
+| `messages.update`           | Message status update (delivered, read, etc.)     |
+| `message-receipt.update`    | Delivery receipt                                  |
+| `message.delete`            | Message deleted via API                           |
+| `send.text`                 | Outbound text sent                                |
+| `send.media`                | Outbound media sent                               |
+| `send.poll`                 | Outbound poll sent                                |
+| `presence.update`           | Contact online/offline presence                   |
+| `groups.upsert`             | New group created or joined                       |
+| `groups.update`             | Group metadata changed                            |
+| `group-participants.update` | Group membership changed                          |
+
+---
+
 ## Quick Start (Docker Compose)
 
-1. Copy env file:
+1. Set up the database — see [INSTALL.md](./INSTALL.md).
+
+2. Copy and fill in env file:
 
 ```bash
 cp .env.example .env
 ```
 
-2. Set values in `.env` (especially `API_KEY` and `WEBHOOK_URL`).
-
-3. Run:
+3. Start the service:
 
 ```bash
 docker compose up -d --build
 ```
 
-4. Call API with key:
+4. Call the health endpoint:
 
 ```bash
 curl -H "x-api-key: YOUR_KEY" http://localhost:3000/health
 ```
+
+5. Scan the QR code printed in the terminal (or fetch it via `GET /auth/qr`).

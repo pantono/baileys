@@ -178,8 +178,8 @@ app.post('/auth/reset', async (req, res, next) => {
 
 app.post('/send/text', async (req, res, next) => {
   try {
-    const { target, message } = req.body || {};
-    const result = await whatsapp.sendText({ target, message });
+    const { target, message, replyTo } = req.body || {};
+    const result = await whatsapp.sendText({ target, message, replyTo });
     res.json({ ok: true, result });
   } catch (error) {
     next(error);
@@ -188,8 +188,8 @@ app.post('/send/text', async (req, res, next) => {
 
 app.post('/send/media', async (req, res, next) => {
   try {
-    const { target, base64, filename, mimetype } = req.body || {};
-    const result = await whatsapp.sendMedia({ target, base64, filename, mimetype });
+    const { target, base64, filename, mimetype, replyTo } = req.body || {};
+    const result = await whatsapp.sendMedia({ target, base64, filename, mimetype, replyTo });
     res.json({ ok: true, result });
   } catch (error) {
     next(error);
@@ -198,8 +198,18 @@ app.post('/send/media', async (req, res, next) => {
 
 app.post('/send/poll', async (req, res, next) => {
   try {
-    const { target, pollText, pollOptions } = req.body || {};
-    const result = await whatsapp.sendPoll({ target, pollText, pollOptions });
+    const { target, pollText, pollOptions, replyTo } = req.body || {};
+    const result = await whatsapp.sendPoll({ target, pollText, pollOptions, replyTo });
+    res.json({ ok: true, result });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/message/delete', async (req, res, next) => {
+  try {
+    const { target, messageId, fromMe, participant } = req.body || {};
+    const result = await whatsapp.deleteMessage({ target, messageId, fromMe, participant });
     res.json({ ok: true, result });
   } catch (error) {
     next(error);

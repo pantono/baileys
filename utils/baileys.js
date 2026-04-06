@@ -68,6 +68,35 @@ async function readEventsBetween(phoneNumber, startDate, endDate) {
   return db.queryEventsBetween(phoneNumber, startDate, endDate);
 }
 
+function buildQuoted(replyTo, jid) {
+  if (!replyTo) return undefined;
+  if (typeof replyTo !== 'object' || Array.isArray(replyTo)) {
+    const error = new Error('replyTo must be an object.');
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!replyTo.id || typeof replyTo.id !== 'string') {
+    const error = new Error('replyTo.id is required and must be a string.');
+    error.statusCode = 400;
+    throw error;
+  }
+  return {
+    key: {
+      remoteJid: (replyTo.remoteJid && typeof replyTo.remoteJid === 'string')
+        ? replyTo.remoteJid.trim()
+        : jid,
+      fromMe: Boolean(replyTo.fromMe),
+      id: replyTo.id.trim(),
+      ...(replyTo.participant && typeof replyTo.participant === 'string'
+        ? { participant: replyTo.participant.trim() }
+        : {}),
+    },
+    message: replyTo.message && typeof replyTo.message === 'object'
+      ? replyTo.message
+      : { conversation: '' },
+  };
+}
+
 const MAX_WEBHOOK_QUEUE_SIZE = 500;
 const MAX_RECONNECT_ATTEMPTS = 20;
 
@@ -506,19 +535,20 @@ function createWhatsAppService({ phoneNumber, config, log }) {
       };
     },
 
-    async sendText({ target, message }) {
+    async sendText({ target, message, replyTo }) {
       const jid = normalizeTarget(target);
       if (!message || typeof message !== 'string') {
         throwBadRequest('message is required and must be a string.');
       }
+      const quoted = buildQuoted(replyTo, jid);
       await ensureConnected();
 
-      const sent = await socket.sendMessage(jid, { text: message });
-      pushEvent('send.text', { jid, sent });
+      const sent = await socket.sendMessage(jid, { text: message }, { quoted });
+      pushEvent('send.text', { jid, sent, replyToId: quoted?.key?.id });
       return { jid, sent };
     },
 
-    async sendMedia({ target, base64, filename, mimetype }) {
+    async sendMedia({ target, base64, filename, mimetype, replyTo }) {
       const jid = normalizeTarget(target);
       if (!base64 || typeof base64 !== 'string') {
         throwBadRequest('base64 is required and must be a base64 string.');
@@ -529,21 +559,22 @@ function createWhatsAppService({ phoneNumber, config, log }) {
       if (!mimetype || typeof mimetype !== 'string') {
         throwBadRequest('mimetype is required and must be a string.');
       }
-
+      const quoted = buildQuoted(replyTo, jid);
       await ensureConnected();
-      const buffer = Buffer.from(base64, 'base64');
-      const sent = await socket.sendMessage(jid, {
-        document: buffer,
-        fileName: filename,
-        mimetype,
-      });
 
-      pushEvent('send.media', { jid, fileName: filename, mimetype, messageId: sent?.key?.id });
+      const buffer = Buffer.from(base64, 'base64');
+      const sent = await socket.sendMessage(
+        jid,
+        { document: buffer, fileName: filename, mimetype },
+        { quoted }
+      );
+
+      pushEvent('send.media', { jid, fileName: filename, mimetype, messageId: sent?.key?.id, replyToId: quoted?.key?.id });
 
       return { jid, fileName: filename, mimetype, sent };
     },
 
-    async sendPoll({ target, pollText, pollOptions }) {
+    async sendPoll({ target, pollText, pollOptions, replyTo }) {
       const jid = normalizeTarget(target);
       if (!pollText || typeof pollText !== 'string') {
         throwBadRequest('pollText is required and must be a string.');
@@ -551,7 +582,7 @@ function createWhatsAppService({ phoneNumber, config, log }) {
       if (!Array.isArray(pollOptions) || pollOptions.length < 2) {
         throwBadRequest('pollOptions is required and must be an array with at least 2 options.');
       }
-
+      const quoted = buildQuoted(replyTo, jid);
       await ensureConnected();
 
       const options = pollOptions.map((option) => String(option).trim()).filter(Boolean);
@@ -559,13 +590,36 @@ function createWhatsAppService({ phoneNumber, config, log }) {
         throwBadRequest('pollOptions must contain at least 2 non-empty options.');
       }
 
-      const sent = await socket.sendMessage(jid, {
-        poll: { name: pollText, values: options, selectableCount: 1 },
-      });
+      const sent = await socket.sendMessage(
+        jid,
+        { poll: { name: pollText, values: options, selectableCount: 1 } },
+        { quoted }
+      );
 
-      pushEvent('send.poll', { jid, pollText, options, messageId: sent?.key?.id });
+      pushEvent('send.poll', { jid, pollText, options, messageId: sent?.key?.id, replyToId: quoted?.key?.id });
 
       return { jid, pollText, options, sent };
+    },
+
+    async deleteMessage({ target, messageId, fromMe, participant }) {
+      const jid = normalizeTarget(target);
+      if (!messageId || typeof messageId !== 'string') {
+        throwBadRequest('messageId is required and must be a string.');
+      }
+      if (typeof fromMe !== 'boolean') {
+        throwBadRequest('fromMe is required and must be a boolean.');
+      }
+
+      await ensureConnected();
+
+      const key = { remoteJid: jid, fromMe, id: messageId };
+      if (participant && typeof participant === 'string') {
+        key.participant = participant.trim();
+      }
+
+      await socket.sendMessage(jid, { delete: key });
+      pushEvent('message.delete', { jid, messageId, fromMe, participant: key.participant });
+      return { jid, messageId, fromMe };
     },
   };
 }
