@@ -549,7 +549,7 @@ function createWhatsAppService({ phoneNumber, config, log }) {
       return { jid, sent };
     },
 
-    async sendMedia({ target, base64, filename, mimetype, replyTo }) {
+    async sendMedia({ target, base64, filename, mimetype, message, replyTo }) {
       const jid = normalizeTarget(target);
       if (!base64 || typeof base64 !== 'string') {
         throwBadRequest('base64 is required and must be a base64 string.');
@@ -564,9 +564,13 @@ function createWhatsAppService({ phoneNumber, config, log }) {
       await ensureConnected();
 
       const buffer = Buffer.from(base64, 'base64');
+      const msgContent = { document: buffer, fileName: filename, mimetype };
+      if (message && typeof message === 'string') {
+        msgContent.caption = message;
+      }
       const sent = await socket.sendMessage(
         jid,
-        { document: buffer, fileName: filename, mimetype },
+        msgContent,
         { quoted }
       );
 

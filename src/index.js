@@ -188,8 +188,8 @@ app.post('/send/text', async (req, res, next) => {
 
 app.post('/send/media', async (req, res, next) => {
   try {
-    const { target, base64, filename, mimetype, replyTo } = req.body || {};
-    const result = await whatsapp.sendMedia({ target, base64, filename, mimetype, replyTo });
+    const { target, base64, filename, mimetype, message, replyTo } = req.body || {};
+    const result = await whatsapp.sendMedia({ target, base64, filename, mimetype, message, replyTo });
     res.json({ ok: true, result });
   } catch (error) {
     next(error);
