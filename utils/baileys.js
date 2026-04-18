@@ -651,6 +651,47 @@ function createWhatsAppService({ phoneNumber, config, log }) {
       return { jid, latitude, longitude, sent };
     },
 
+    async createGroup({ name, participants }) {
+      if (!name || typeof name !== 'string') {
+        throwBadRequest('name is required and must be a string.');
+      }
+      if (!Array.isArray(participants) || participants.length === 0) {
+        throwBadRequest('participants is required and must be a non-empty array of JIDs.');
+      }
+      await ensureConnected();
+
+      const result = await socket.groupCreate(name, participants.map((p) => String(p).trim()));
+      pushEvent('group.create', { name, participants, groupId: result?.id });
+      return { name, participants, groupId: result?.id, result };
+    },
+
+    async joinGroup({ inviteCode }) {
+      if (!inviteCode || typeof inviteCode !== 'string') {
+        throwBadRequest('inviteCode is required and must be a string.');
+      }
+      await ensureConnected();
+
+      // Accept either a full invite URL or just the code
+      const code = inviteCode.trim().replace(/.*chat\.whatsapp\.com\//, '');
+      const groupId = await socket.groupAcceptInvite(code);
+      pushEvent('group.join', { inviteCode: code, groupId });
+      return { inviteCode: code, groupId };
+    },
+
+    async listGroups() {
+      await ensureConnected();
+
+      const groups = await socket.groupFetchAllParticipating();
+      const list = Object.values(groups).map((g) => ({
+        id: g.id,
+        subject: g.subject,
+        creation: g.creation,
+        owner: g.owner,
+        participantCount: g.participants?.length ?? 0,
+      }));
+      return { groups: list };
+    },
+
     async deleteMessage({ target, messageId, fromMe, participant }) {
       const jid = normalizeTarget(target);
       if (!messageId || typeof messageId !== 'string') {

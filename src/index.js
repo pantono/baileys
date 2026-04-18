@@ -226,6 +226,35 @@ app.post('/send/poll', async (req, res, next) => {
   }
 });
 
+app.post('/group/create', async (req, res, next) => {
+  try {
+    const { name, participants } = req.body || {};
+    const result = await whatsapp.createGroup({ name, participants });
+    res.json({ ok: true, result });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/group/join', async (req, res, next) => {
+  try {
+    const { inviteCode } = req.body || {};
+    const result = await whatsapp.joinGroup({ inviteCode });
+    res.json({ ok: true, result });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/group/list', async (req, res, next) => {
+  try {
+    const result = await whatsapp.listGroups();
+    res.json({ ok: true, result });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/message/delete', async (req, res, next) => {
   try {
     const { target, messageId, fromMe, participant } = req.body || {};

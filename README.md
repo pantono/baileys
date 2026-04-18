@@ -10,7 +10,7 @@ Node.js + Express service that wraps `@whiskeysockets/baileys` and exposes a RES
 - Automatic re-auth on device removal — no manual reset required
 - Exponential backoff reconnection with configurable max attempts
 - QR login via API or terminal
-- REST endpoints for health, auth, messaging, and message deletion
+- REST endpoints for health, auth, messaging, contacts, locations, groups, and message deletion
 - API key protection on every endpoint
 
 ## Requirements
@@ -203,6 +203,7 @@ Body:
 | `base64`   | Yes      | string | Base64-encoded file content             |
 | `filename` | Yes      | string | File name shown to recipient            |
 | `mimetype` | Yes      | string | MIME type, e.g. `application/pdf`       |
+| `message`  | No       | string | Optional caption displayed with the file |
 | `replyTo`  | No       | object | Quote a previous message (see [replyTo](#replyto-object)) |
 
 Example body:
@@ -212,7 +213,62 @@ Example body:
   "target": "15551234567@s.whatsapp.net",
   "base64": "<base64-data>",
   "filename": "report.pdf",
-  "mimetype": "application/pdf"
+  "mimetype": "application/pdf",
+  "message": "Here is the report you requested."
+}
+```
+
+---
+
+### `POST /send/contact`
+
+Send a contact card.
+
+Body:
+
+| Field          | Required | Type   | Description                             |
+|----------------|----------|--------|-----------------------------------------|
+| `target`       | Yes      | string | Recipient JID                           |
+| `contactName`  | Yes      | string | Display name for the contact            |
+| `contactPhone` | Yes      | string | Phone number for the contact            |
+| `replyTo`      | No       | object | Quote a previous message (see [replyTo](#replyto-object)) |
+
+Example body:
+
+```json
+{
+  "target": "15551234567@s.whatsapp.net",
+  "contactName": "Jane Doe",
+  "contactPhone": "+15559876543"
+}
+```
+
+---
+
+### `POST /send/location`
+
+Send a location pin.
+
+Body:
+
+| Field       | Required | Type   | Description                                  |
+|-------------|----------|--------|----------------------------------------------|
+| `target`    | Yes      | string | Recipient JID                                |
+| `latitude`  | Yes      | number | Decimal latitude                             |
+| `longitude` | Yes      | number | Decimal longitude                            |
+| `name`      | No       | string | Location name shown above the pin            |
+| `address`   | No       | string | Address line shown below the name            |
+| `replyTo`   | No       | object | Quote a previous message (see [replyTo](#replyto-object)) |
+
+Example body:
+
+```json
+{
+  "target": "15551234567@s.whatsapp.net",
+  "latitude": 37.7749,
+  "longitude": -122.4194,
+  "name": "San Francisco",
+  "address": "San Francisco, CA, USA"
 }
 ```
 
@@ -273,6 +329,88 @@ Group reply (quoting someone else):
   "remoteJid": "1203630XXXXXXXXX@g.us",
   "participant": "15559876543@s.whatsapp.net",
   "message": { "conversation": "The original message text" }
+}
+```
+
+---
+
+### `POST /group/create`
+
+Create a new WhatsApp group.
+
+Body:
+
+| Field          | Required | Type     | Description                                      |
+|----------------|----------|----------|--------------------------------------------------|
+| `name`         | Yes      | string   | Group subject/name                               |
+| `participants` | Yes      | string[] | Array of JIDs to add (must include at least one) |
+
+Example body:
+
+```json
+{
+  "name": "Project Team",
+  "participants": ["15551234567@s.whatsapp.net", "15559876543@s.whatsapp.net"]
+}
+```
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "result": {
+    "name": "Project Team",
+    "participants": ["15551234567@s.whatsapp.net", "15559876543@s.whatsapp.net"],
+    "groupId": "1203630XXXXXXXXX@g.us"
+  }
+}
+```
+
+---
+
+### `POST /group/join`
+
+Join a group via an invite link or code.
+
+Body:
+
+| Field        | Required | Type   | Description                                                        |
+|--------------|----------|--------|--------------------------------------------------------------------|
+| `inviteCode` | Yes      | string | Full invite URL (`https://chat.whatsapp.com/XYZ`) or just the code |
+
+Example body:
+
+```json
+{
+  "inviteCode": "https://chat.whatsapp.com/AbCdEfGhIjK"
+}
+```
+
+---
+
+### `GET /group/list`
+
+Returns all groups the connected number is currently participating in.
+
+No body required.
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "result": {
+    "groups": [
+      {
+        "id": "1203630XXXXXXXXX@g.us",
+        "subject": "Project Team",
+        "creation": 1700000000,
+        "owner": "15551234567@s.whatsapp.net",
+        "participantCount": 5
+      }
+    ]
+  }
 }
 ```
 
@@ -339,6 +477,10 @@ Key event types:
 | `send.text`                 | Outbound text sent                                |
 | `send.media`                | Outbound media sent                               |
 | `send.poll`                 | Outbound poll sent                                |
+| `send.contact`              | Outbound contact card sent                        |
+| `send.location`             | Outbound location pin sent                        |
+| `group.create`              | Group created via API                             |
+| `group.join`                | Group joined via invite code                      |
 | `presence.update`           | Contact online/offline presence                   |
 | `groups.upsert`             | New group created or joined                       |
 | `groups.update`             | Group metadata changed                            |
