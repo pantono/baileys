@@ -196,6 +196,26 @@ app.post('/send/media', async (req, res, next) => {
   }
 });
 
+app.post('/send/contact', async (req, res, next) => {
+  try {
+    const { target, contactName, contactPhone, replyTo } = req.body || {};
+    const result = await whatsapp.sendContact({ target, contactName, contactPhone, replyTo });
+    res.json({ ok: true, result });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/send/location', async (req, res, next) => {
+  try {
+    const { target, latitude, longitude, name, address, replyTo } = req.body || {};
+    const result = await whatsapp.sendLocation({ target, latitude, longitude, name, address, replyTo });
+    res.json({ ok: true, result });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/send/poll', async (req, res, next) => {
   try {
     const { target, pollText, pollOptions, replyTo } = req.body || {};

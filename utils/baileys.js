@@ -606,6 +606,51 @@ function createWhatsAppService({ phoneNumber, config, log }) {
       return { jid, pollText, options, sent };
     },
 
+    async sendContact({ target, contactName, contactPhone, replyTo }) {
+      const jid = normalizeTarget(target);
+      if (!contactName || typeof contactName !== 'string') {
+        throwBadRequest('contactName is required and must be a string.');
+      }
+      if (!contactPhone || typeof contactPhone !== 'string') {
+        throwBadRequest('contactPhone is required and must be a string.');
+      }
+      const quoted = buildQuoted(replyTo, jid);
+      await ensureConnected();
+
+      const vcard = `BEGIN:VCARD\nVERSION:3.0\nFN:${contactName}\nTEL;type=CELL;type=VOICE;waid=${contactPhone.replace(/\D/g, '')}:${contactPhone}\nEND:VCARD`;
+      const sent = await socket.sendMessage(
+        jid,
+        { contacts: { displayName: contactName, contacts: [{ vcard }] } },
+        { quoted }
+      );
+
+      pushEvent('send.contact', { jid, contactName, contactPhone, messageId: sent?.key?.id, replyToId: quoted?.key?.id });
+
+      return { jid, contactName, contactPhone, sent };
+    },
+
+    async sendLocation({ target, latitude, longitude, name, address, replyTo }) {
+      const jid = normalizeTarget(target);
+      if (typeof latitude !== 'number') {
+        throwBadRequest('latitude is required and must be a number.');
+      }
+      if (typeof longitude !== 'number') {
+        throwBadRequest('longitude is required and must be a number.');
+      }
+      const quoted = buildQuoted(replyTo, jid);
+      await ensureConnected();
+
+      const locationMsg = { location: { degreesLatitude: latitude, degreesLongitude: longitude } };
+      if (name && typeof name === 'string') locationMsg.location.name = name;
+      if (address && typeof address === 'string') locationMsg.location.address = address;
+
+      const sent = await socket.sendMessage(jid, locationMsg, { quoted });
+
+      pushEvent('send.location', { jid, latitude, longitude, messageId: sent?.key?.id, replyToId: quoted?.key?.id });
+
+      return { jid, latitude, longitude, sent };
+    },
+
     async deleteMessage({ target, messageId, fromMe, participant }) {
       const jid = normalizeTarget(target);
       if (!messageId || typeof messageId !== 'string') {
