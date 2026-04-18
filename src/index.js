@@ -176,6 +176,53 @@ app.post('/auth/reset', async (req, res, next) => {
   }
 });
 
+app.get('/webhook-targets', async (req, res, next) => {
+  try {
+    const targets = await db.getWebhookTargets(WHATSAPP_NUMBER);
+    res.json({ ok: true, targets });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/webhook-targets', async (req, res, next) => {
+  try {
+    const { url } = req.body || {};
+    if (!url || typeof url !== 'string') {
+      res.status(400).json({ ok: false, message: 'url is required and must be a string.' });
+      return;
+    }
+    try { new URL(url); } catch {
+      res.status(400).json({ ok: false, message: 'url must be a valid URL.' });
+      return;
+    }
+    const id = await db.insertWebhookTarget(WHATSAPP_NUMBER, url.trim());
+    await whatsapp.reloadWebhookTargets();
+    res.status(201).json({ ok: true, target: { id, url: url.trim() } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/webhook-targets/:id', async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ ok: false, message: 'id must be a positive integer.' });
+      return;
+    }
+    const deleted = await db.deleteWebhookTarget(id, WHATSAPP_NUMBER);
+    if (!deleted) {
+      res.status(404).json({ ok: false, message: 'Webhook target not found.' });
+      return;
+    }
+    await whatsapp.reloadWebhookTargets();
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/send/text', async (req, res, next) => {
   try {
     const { target, message, replyTo } = req.body || {};
@@ -360,8 +407,11 @@ async function start() {
     numberConfig = await db.getNumberConfig(WHATSAPP_NUMBER);
   }
 
+  const webhookTargets = await db.getWebhookTargets(WHATSAPP_NUMBER);
+  log(`Loaded ${webhookTargets.length} webhook target(s) for ${WHATSAPP_NUMBER}`);
+
   const config = {
-    webhookUrl:              numberConfig.webhook_url             || '',
+    webhookTargets,
     webhookTimeoutMs:        numberConfig.webhook_timeout_ms,
     webhookMaxRetries:       numberConfig.webhook_max_retries,
     webhookRetryBaseMs:      numberConfig.webhook_retry_base_ms,
@@ -371,8 +421,6 @@ async function start() {
     reconnectMaxMs:          numberConfig.reconnect_max_ms,
     fullHistoryOnReconnect:  Boolean(numberConfig.full_history_on_reconnect),
   };
-
-  log(`Loaded config for ${WHATSAPP_NUMBER}`, config);
 
   whatsapp = createWhatsAppService({ phoneNumber: WHATSAPP_NUMBER, config, log });
   await whatsapp.start();

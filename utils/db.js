@@ -230,12 +230,40 @@ async function queryEventsBetween(phoneNumber, startDate, endDate) {
 }
 
 // ---------------------------------------------------------------------------
+// Webhook targets
+// ---------------------------------------------------------------------------
+
+async function getWebhookTargets(phoneNumber) {
+    const [rows] = await getPool().query(
+        'SELECT id, url, created_at FROM wa_webhook_targets WHERE phone_number = ? ORDER BY id ASC',
+        [phoneNumber]
+    );
+    return rows;
+}
+
+async function insertWebhookTarget(phoneNumber, url) {
+    const [result] = await getPool().query(
+        'INSERT INTO wa_webhook_targets (phone_number, url) VALUES (?, ?)',
+        [phoneNumber, url]
+    );
+    return result.insertId;
+}
+
+async function deleteWebhookTarget(id, phoneNumber) {
+    const [result] = await getPool().query(
+        'DELETE FROM wa_webhook_targets WHERE id = ? AND phone_number = ?',
+        [id, phoneNumber]
+    );
+    return result.affectedRows > 0;
+}
+
+// ---------------------------------------------------------------------------
 // Webhook queue  (persisted so retries survive restarts)
 // ---------------------------------------------------------------------------
 
 async function loadPendingWebhookItems(phoneNumber) {
     const [rows] = await getPool().query(
-        `SELECT id, payload, attempt, enqueued_at
+        `SELECT id, webhook_url, payload, attempt, enqueued_at
          FROM wa_webhook_queue
          WHERE phone_number = ?
          ORDER BY enqueued_at ASC`,
@@ -243,6 +271,7 @@ async function loadPendingWebhookItems(phoneNumber) {
     );
     return rows.map((row) => ({
         dbId: row.id,
+        url: row.webhook_url,
         payload: typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload,
         attempt: row.attempt,
         enqueuedAt: row.enqueued_at instanceof Date
@@ -251,12 +280,12 @@ async function loadPendingWebhookItems(phoneNumber) {
     }));
 }
 
-async function insertWebhookQueueItem(phoneNumber, payload, enqueuedAt) {
+async function insertWebhookQueueItem(phoneNumber, webhookUrl, payload, enqueuedAt) {
     const ts = new Date(enqueuedAt);
     const [result] = await getPool().query(
-        `INSERT INTO wa_webhook_queue (phone_number, payload, attempt, enqueued_at, next_retry_at)
-         VALUES (?, ?, 0, ?, ?)`,
-        [phoneNumber, JSON.stringify(payload), ts, ts]
+        `INSERT INTO wa_webhook_queue (phone_number, webhook_url, payload, attempt, enqueued_at, next_retry_at)
+         VALUES (?, ?, ?, 0, ?, ?)`,
+        [phoneNumber, webhookUrl, JSON.stringify(payload), ts, ts]
     );
     return result.insertId;
 }
@@ -285,6 +314,9 @@ module.exports = {
     deleteAuthState,
     insertEvent,
     queryEventsBetween,
+    getWebhookTargets,
+    insertWebhookTarget,
+    deleteWebhookTarget,
     loadPendingWebhookItems,
     insertWebhookQueueItem,
     updateWebhookQueueItem,

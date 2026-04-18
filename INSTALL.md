@@ -79,10 +79,21 @@ CREATE TABLE IF NOT EXISTS wa_events (
   INDEX idx_phone_timestamp (phone_number, event_timestamp)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Webhook delivery targets (multiple URLs per number).
+CREATE TABLE IF NOT EXISTS wa_webhook_targets (
+  id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  phone_number VARCHAR(30)  NOT NULL,
+  url          VARCHAR(500) NOT NULL,
+  created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  INDEX idx_phone_number (phone_number)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- Persistent webhook delivery queue (survives restarts; rows deleted on success).
 CREATE TABLE IF NOT EXISTS wa_webhook_queue (
   id            BIGINT UNSIGNED  NOT NULL AUTO_INCREMENT,
   phone_number  VARCHAR(30)      NOT NULL,
+  webhook_url   VARCHAR(500)     NOT NULL DEFAULT '',
   payload       LONGTEXT         NOT NULL,
   attempt       TINYINT UNSIGNED NOT NULL DEFAULT 0,
   enqueued_at   DATETIME(3)      NOT NULL,
@@ -91,6 +102,35 @@ CREATE TABLE IF NOT EXISTS wa_webhook_queue (
   INDEX idx_phone_enqueued (phone_number, enqueued_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
+
+## Migrating from a previous version
+
+If you have an existing installation (with `webhook_url` in `wa_numbers`), run:
+
+```sql
+-- Add webhook_url column to the queue table
+ALTER TABLE wa_webhook_queue
+  ADD COLUMN webhook_url VARCHAR(500) NOT NULL DEFAULT '' AFTER phone_number;
+
+-- Create the new targets table
+CREATE TABLE IF NOT EXISTS wa_webhook_targets (
+  id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  phone_number VARCHAR(30)  NOT NULL,
+  url          VARCHAR(500) NOT NULL,
+  created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  INDEX idx_phone_number (phone_number)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Migrate existing single webhook URLs to the new targets table (skips empty URLs)
+INSERT INTO wa_webhook_targets (phone_number, url)
+  SELECT phone_number, webhook_url FROM wa_numbers WHERE webhook_url != '';
+
+-- Clear the old queue (in-flight items have no target URL and cannot be delivered)
+TRUNCATE TABLE wa_webhook_queue;
+```
+
+After migrating, the `webhook_url` column in `wa_numbers` is no longer used.
 
 ## 3. Configure the application
 
@@ -120,8 +160,10 @@ npm start
 ```
 
 On first start the service will create a row in `wa_numbers` for the configured
-`WHATSAPP_NUMBER` using default values. You can update webhook URLs and other
-settings directly in the `wa_numbers` table and restart the service to apply them.
+`WHATSAPP_NUMBER` using default values. Webhook targets are managed via the
+`/webhook-targets` API endpoints (changes take effect immediately, no restart needed).
+Other settings (timeouts, retry counts) can be updated directly in the `wa_numbers`
+table; restart the service to apply them.
 
 ## 5. Multiple numbers
 
@@ -132,7 +174,9 @@ database; rows are partitioned by `phone_number` in every table.
 To pre-configure a number before starting it:
 
 ```sql
-INSERT INTO wa_numbers (phone_number, webhook_url)
-VALUES ('15559876543', 'https://your-server/webhook')
-ON DUPLICATE KEY UPDATE webhook_url = VALUES(webhook_url);
+INSERT INTO wa_numbers (phone_number) VALUES ('15559876543')
+ON DUPLICATE KEY UPDATE phone_number = phone_number;
+
+INSERT INTO wa_webhook_targets (phone_number, url)
+VALUES ('15559876543', 'https://your-server/webhook');
 ```

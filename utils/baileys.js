@@ -102,22 +102,25 @@ const MAX_RECONNECT_ATTEMPTS = 20;
 
 function makeWebhookDispatcher(config, log, db, phoneNumber) {
   const {
-    webhookUrl,
     webhookTimeoutMs,
     webhookMaxRetries,
     webhookRetryBaseMs,
     webhookRetryMaxMs,
   } = config;
 
+  let targets = config.targets || [];
+
   const queue = [];
   let running = false;
 
   async function init() {
-    if (!webhookUrl) return;
+    if (!targets.length) return;
     try {
       const items = await db.loadPendingWebhookItems(phoneNumber);
       for (const item of items) {
-        queue.push({ ...item, url: webhookUrl });
+        if (item.url) {
+          queue.push(item);
+        }
       }
       if (queue.length > 0) {
         log(`Loaded ${queue.length} pending webhook items from DB`);
@@ -203,37 +206,41 @@ function makeWebhookDispatcher(config, log, db, phoneNumber) {
   }
 
   function enqueue(payload) {
-    if (!webhookUrl) {
+    if (!targets.length) {
       return;
     }
 
-    if (queue.length >= MAX_WEBHOOK_QUEUE_SIZE) {
-      const evicted = queue.shift();
-      log('Webhook queue full, evicting oldest item', { eventType: evicted.payload?.eventType });
-      if (evicted.dbId != null) {
-        db.deleteWebhookQueueItem(evicted.dbId).catch((error) => {
-          log('Failed to evict webhook queue item from DB', toSafeError(error));
-        });
-      }
-    }
-
     const enqueuedAt = now();
-    db.insertWebhookQueueItem(phoneNumber, payload, enqueuedAt)
-      .then((dbId) => {
-        queue.push({ dbId, url: webhookUrl, payload, attempt: 0, enqueuedAt });
-        void run();
-      })
-      .catch((error) => {
-        log('Failed to persist webhook item to DB, enqueuing in-memory only', toSafeError(error));
-        queue.push({ dbId: null, url: webhookUrl, payload, attempt: 0, enqueuedAt });
-        void run();
-      });
+
+    for (const target of targets) {
+      if (queue.length >= MAX_WEBHOOK_QUEUE_SIZE) {
+        const evicted = queue.shift();
+        log('Webhook queue full, evicting oldest item', { eventType: evicted.payload?.eventType, url: evicted.url });
+        if (evicted.dbId != null) {
+          db.deleteWebhookQueueItem(evicted.dbId).catch((error) => {
+            log('Failed to evict webhook queue item from DB', toSafeError(error));
+          });
+        }
+      }
+
+      db.insertWebhookQueueItem(phoneNumber, target.url, payload, enqueuedAt)
+        .then((dbId) => {
+          queue.push({ dbId, url: target.url, payload, attempt: 0, enqueuedAt });
+          void run();
+        })
+        .catch((error) => {
+          log('Failed to persist webhook item to DB, enqueuing in-memory only', toSafeError(error));
+          queue.push({ dbId: null, url: target.url, payload, attempt: 0, enqueuedAt });
+          void run();
+        });
+    }
   }
 
   return {
     enqueue,
     init,
     getQueueSize: () => queue.length,
+    setTargets: (newTargets) => { targets = newTargets; },
   };
 }
 
@@ -245,7 +252,7 @@ function makeWebhookDispatcher(config, log, db, phoneNumber) {
  */
 function createWhatsAppService({ phoneNumber, config, log }) {
   const {
-    webhookUrl,
+    webhookTargets,
     webhookTimeoutMs,
     webhookMaxRetries,
     webhookRetryBaseMs,
@@ -257,7 +264,7 @@ function createWhatsAppService({ phoneNumber, config, log }) {
   } = config;
 
   const webhook = makeWebhookDispatcher(
-    { webhookUrl, webhookTimeoutMs, webhookMaxRetries, webhookRetryBaseMs, webhookRetryMaxMs },
+    { targets: webhookTargets || [], webhookTimeoutMs, webhookMaxRetries, webhookRetryBaseMs, webhookRetryMaxMs },
     log,
     db,
     phoneNumber
@@ -504,6 +511,12 @@ function createWhatsAppService({ phoneNumber, config, log }) {
       await webhook.init();
       await connect(Boolean(options.forceNewLogin));
       log('WhatsApp service initialized');
+    },
+
+    async reloadWebhookTargets() {
+      const targets = await db.getWebhookTargets(phoneNumber);
+      webhook.setTargets(targets);
+      return targets;
     },
 
     async stop() {
