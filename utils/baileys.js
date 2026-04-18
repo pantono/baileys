@@ -579,7 +579,7 @@ function createWhatsAppService({ phoneNumber, config, log }) {
       return { jid, fileName: filename, mimetype, sent };
     },
 
-    async sendPoll({ target, pollText, pollOptions, replyTo }) {
+    async sendPoll({ target, pollText, pollOptions, multipleAnswers, replyTo }) {
       const jid = normalizeTarget(target);
       if (!pollText || typeof pollText !== 'string') {
         throwBadRequest('pollText is required and must be a string.');
@@ -595,9 +595,10 @@ function createWhatsAppService({ phoneNumber, config, log }) {
         throwBadRequest('pollOptions must contain at least 2 non-empty options.');
       }
 
+      const selectableCount = multipleAnswers === true ? 0 : 1;
       const sent = await socket.sendMessage(
         jid,
-        { poll: { name: pollText, values: options, selectableCount: 1 } },
+        { poll: { name: pollText, values: options, selectableCount } },
         { quoted }
       );
 
@@ -690,6 +691,67 @@ function createWhatsAppService({ phoneNumber, config, log }) {
         participantCount: g.participants?.length ?? 0,
       }));
       return { groups: list };
+    },
+
+    async addGroupParticipants({ groupId, participants }) {
+      if (!groupId || typeof groupId !== 'string') {
+        throwBadRequest('groupId is required and must be a string.');
+      }
+      if (!Array.isArray(participants) || participants.length === 0) {
+        throwBadRequest('participants is required and must be a non-empty array of JIDs.');
+      }
+      await ensureConnected();
+
+      const jids = participants.map((p) => String(p).trim());
+      const result = await socket.groupParticipantsUpdate(groupId.trim(), jids, 'add');
+      pushEvent('group.participants.add', { groupId, participants: jids });
+      return { groupId, participants: jids, result };
+    },
+
+    async removeGroupParticipants({ groupId, participants }) {
+      if (!groupId || typeof groupId !== 'string') {
+        throwBadRequest('groupId is required and must be a string.');
+      }
+      if (!Array.isArray(participants) || participants.length === 0) {
+        throwBadRequest('participants is required and must be a non-empty array of JIDs.');
+      }
+      await ensureConnected();
+
+      const jids = participants.map((p) => String(p).trim());
+      const result = await socket.groupParticipantsUpdate(groupId.trim(), jids, 'remove');
+      pushEvent('group.participants.remove', { groupId, participants: jids });
+      return { groupId, participants: jids, result };
+    },
+
+    async getContact({ target }) {
+      const jid = normalizeTarget(target);
+      await ensureConnected();
+
+      const [result] = await socket.onWhatsApp(jid.replace(/@.*/, ''));
+      if (!result?.exists) {
+        const error = new Error('Contact not found on WhatsApp.');
+        error.statusCode = 404;
+        throw error;
+      }
+      return { jid: result.jid, exists: true };
+    },
+
+    async blockContact({ target }) {
+      const jid = normalizeTarget(target);
+      await ensureConnected();
+
+      await socket.updateBlockStatus(jid, 'block');
+      pushEvent('contact.block', { jid });
+      return { jid, blocked: true };
+    },
+
+    async unblockContact({ target }) {
+      const jid = normalizeTarget(target);
+      await ensureConnected();
+
+      await socket.updateBlockStatus(jid, 'unblock');
+      pushEvent('contact.unblock', { jid });
+      return { jid, blocked: false };
     },
 
     async deleteMessage({ target, messageId, fromMe, participant }) {

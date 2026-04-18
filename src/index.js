@@ -218,8 +218,8 @@ app.post('/send/location', async (req, res, next) => {
 
 app.post('/send/poll', async (req, res, next) => {
   try {
-    const { target, pollText, pollOptions, replyTo } = req.body || {};
-    const result = await whatsapp.sendPoll({ target, pollText, pollOptions, replyTo });
+    const { target, pollText, pollOptions, multipleAnswers, replyTo } = req.body || {};
+    const result = await whatsapp.sendPoll({ target, pollText, pollOptions, multipleAnswers, replyTo });
     res.json({ ok: true, result });
   } catch (error) {
     next(error);
@@ -249,6 +249,56 @@ app.post('/group/join', async (req, res, next) => {
 app.get('/group/list', async (req, res, next) => {
   try {
     const result = await whatsapp.listGroups();
+    res.json({ ok: true, result });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/group/participants/add', async (req, res, next) => {
+  try {
+    const { groupId, participants } = req.body || {};
+    const result = await whatsapp.addGroupParticipants({ groupId, participants });
+    res.json({ ok: true, result });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/group/participants/remove', async (req, res, next) => {
+  try {
+    const { groupId, participants } = req.body || {};
+    const result = await whatsapp.removeGroupParticipants({ groupId, participants });
+    res.json({ ok: true, result });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/contact', async (req, res, next) => {
+  try {
+    const target = req.query.target;
+    const result = await whatsapp.getContact({ target });
+    res.json({ ok: true, result });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/contact/block', async (req, res, next) => {
+  try {
+    const { target } = req.body || {};
+    const result = await whatsapp.blockContact({ target });
+    res.json({ ok: true, result });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/contact/unblock', async (req, res, next) => {
+  try {
+    const { target } = req.body || {};
+    const result = await whatsapp.unblockContact({ target });
     res.json({ ok: true, result });
   } catch (error) {
     next(error);

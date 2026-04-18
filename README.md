@@ -280,12 +280,13 @@ Send a poll message.
 
 Body:
 
-| Field         | Required | Type     | Description                              |
-|---------------|----------|----------|------------------------------------------|
-| `target`      | Yes      | string   | Recipient JID                            |
-| `pollText`    | Yes      | string   | Poll question                            |
-| `pollOptions` | Yes      | string[] | At least 2 non-empty options             |
-| `replyTo`     | No       | object   | Quote a previous message (see [replyTo](#replyto-object)) |
+| Field             | Required | Type     | Description                              |
+|-------------------|----------|----------|------------------------------------------|
+| `target`          | Yes      | string   | Recipient JID                            |
+| `pollText`        | Yes      | string   | Poll question                            |
+| `pollOptions`     | Yes      | string[] | At least 2 non-empty options             |
+| `multipleAnswers` | No       | boolean  | `true` to allow selecting multiple options (default `false`) |
+| `replyTo`         | No       | object   | Quote a previous message (see [replyTo](#replyto-object)) |
 
 Example body:
 
@@ -330,6 +331,97 @@ Group reply (quoting someone else):
   "participant": "15559876543@s.whatsapp.net",
   "message": { "conversation": "The original message text" }
 }
+```
+
+---
+
+### `POST /group/participants/remove`
+
+Remove participants from a group. Requires the connected number to be a group admin.
+
+Body:
+
+| Field          | Required | Type     | Description                              |
+|----------------|----------|----------|------------------------------------------|
+| `groupId`      | Yes      | string   | JID of the group (e.g. `123@g.us`)       |
+| `participants` | Yes      | string[] | Array of JIDs to remove                  |
+
+Example body:
+
+```json
+{
+  "groupId": "1203630XXXXXXXXX@g.us",
+  "participants": ["15551234567@s.whatsapp.net"]
+}
+```
+
+---
+
+### `GET /contact`
+
+Check if a number exists on WhatsApp and retrieve its JID.
+
+Query params:
+
+| Param    | Required | Description         |
+|----------|----------|---------------------|
+| `target` | Yes      | Phone number or JID |
+
+Returns `404` if the number is not registered on WhatsApp.
+
+Example:
+
+```bash
+curl -H "x-api-key: YOUR_KEY" \
+  "http://localhost:3000/contact?target=15551234567@s.whatsapp.net"
+```
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "result": {
+    "jid": "15551234567@s.whatsapp.net",
+    "exists": true
+  }
+}
+```
+
+---
+
+### `POST /contact/block`
+
+Block a contact.
+
+Body:
+
+| Field    | Required | Type   | Description         |
+|----------|----------|--------|---------------------|
+| `target` | Yes      | string | JID of the contact  |
+
+Example body:
+
+```json
+{ "target": "15551234567@s.whatsapp.net" }
+```
+
+---
+
+### `POST /contact/unblock`
+
+Unblock a contact.
+
+Body:
+
+| Field    | Required | Type   | Description         |
+|----------|----------|--------|---------------------|
+| `target` | Yes      | string | JID of the contact  |
+
+Example body:
+
+```json
+{ "target": "15551234567@s.whatsapp.net" }
 ```
 
 ---
@@ -416,6 +508,28 @@ Example response:
 
 ---
 
+### `POST /group/participants/add`
+
+Add participants to an existing group. Requires the connected number to be a group admin.
+
+Body:
+
+| Field          | Required | Type     | Description                              |
+|----------------|----------|----------|------------------------------------------|
+| `groupId`      | Yes      | string   | JID of the group (e.g. `123@g.us`)       |
+| `participants` | Yes      | string[] | Array of JIDs to add                     |
+
+Example body:
+
+```json
+{
+  "groupId": "1203630XXXXXXXXX@g.us",
+  "participants": ["15551234567@s.whatsapp.net"]
+}
+```
+
+---
+
 ### `POST /message/delete`
 
 Delete a message (for everyone, if permitted by WhatsApp).
@@ -481,6 +595,10 @@ Key event types:
 | `send.location`             | Outbound location pin sent                        |
 | `group.create`              | Group created via API                             |
 | `group.join`                | Group joined via invite code                      |
+| `group.participants.add`    | Participants added to a group via API             |
+| `group.participants.remove` | Participants removed from a group via API         |
+| `contact.block`             | Contact blocked via API                           |
+| `contact.unblock`           | Contact unblocked via API                         |
 | `presence.update`           | Contact online/offline presence                   |
 | `groups.upsert`             | New group created or joined                       |
 | `groups.update`             | Group metadata changed                            |
