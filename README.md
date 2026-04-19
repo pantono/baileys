@@ -36,7 +36,7 @@ Copy `.env.example` to `.env` and fill in the values.
 | `DB_PASSWORD`     | MySQL password                                        |
 | `DB_NAME`         | MySQL database name                                   |
 
-Webhook URL and all per-number tuning values (timeouts, retry counts, reconnect delays) are stored in the `wa_numbers` table and loaded at startup. Update them directly in the DB and restart the service to apply.
+Webhook targets and all per-number tuning values (timeouts, retry counts, reconnect delays) are stored in the `wa_numbers` and `wa_webhook_targets` tables and loaded at startup. Changes made directly in the DB are picked up automatically every 60 seconds, or immediately via `POST /config/reload`.
 
 ## Authentication
 
@@ -150,6 +150,39 @@ Example response:
 ```
 
 Note: if a linked device is removed from the host phone, the service automatically clears its auth state and restarts the QR flow — no manual reset required.
+
+---
+
+### `POST /config/reload`
+
+Re-reads all per-number settings from `wa_numbers` and webhook targets from `wa_webhook_targets`, and applies them to the running service without a restart.
+
+This is useful after making direct database changes. The service also polls for changes automatically every 60 seconds, so a manual reload is only needed when you want changes to take effect immediately.
+
+Body: none
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "message": "Config reloaded from database."
+}
+```
+
+Settings that take effect immediately:
+
+| Setting | DB column |
+|---------|-----------|
+| Webhook targets | `wa_webhook_targets` rows |
+| Webhook timeout | `webhook_timeout_ms` |
+| Webhook max retries | `webhook_max_retries` |
+| Webhook retry base delay | `webhook_retry_base_ms` |
+| Webhook retry max delay | `webhook_retry_max_ms` |
+| Event buffer retention | `event_retention` |
+| Reconnect base delay | `reconnect_base_ms` |
+| Reconnect max delay | `reconnect_max_ms` |
+| Full history on reconnect | `full_history_on_reconnect` |
 
 ---
 
