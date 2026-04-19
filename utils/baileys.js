@@ -101,12 +101,10 @@ const MAX_WEBHOOK_QUEUE_SIZE = 500;
 const MAX_RECONNECT_ATTEMPTS = 20;
 
 function makeWebhookDispatcher(config, log, db, phoneNumber) {
-  const {
-    webhookTimeoutMs,
-    webhookMaxRetries,
-    webhookRetryBaseMs,
-    webhookRetryMaxMs,
-  } = config;
+  let webhookTimeoutMs = config.webhookTimeoutMs;
+  let webhookMaxRetries = config.webhookMaxRetries;
+  let webhookRetryBaseMs = config.webhookRetryBaseMs;
+  let webhookRetryMaxMs = config.webhookRetryMaxMs;
 
   let targets = config.targets || [];
 
@@ -241,6 +239,12 @@ function makeWebhookDispatcher(config, log, db, phoneNumber) {
     init,
     getQueueSize: () => queue.length,
     setTargets: (newTargets) => { targets = newTargets; },
+    setDispatcherConfig: (newConfig) => {
+      if (newConfig.webhookTimeoutMs !== undefined) webhookTimeoutMs = newConfig.webhookTimeoutMs;
+      if (newConfig.webhookMaxRetries !== undefined) webhookMaxRetries = newConfig.webhookMaxRetries;
+      if (newConfig.webhookRetryBaseMs !== undefined) webhookRetryBaseMs = newConfig.webhookRetryBaseMs;
+      if (newConfig.webhookRetryMaxMs !== undefined) webhookRetryMaxMs = newConfig.webhookRetryMaxMs;
+    },
   };
 }
 
@@ -251,20 +255,17 @@ function makeWebhookDispatcher(config, log, db, phoneNumber) {
  * @param {Function} options.log
  */
 function createWhatsAppService({ phoneNumber, config, log }) {
-  const {
-    webhookTargets,
-    webhookTimeoutMs,
-    webhookMaxRetries,
-    webhookRetryBaseMs,
-    webhookRetryMaxMs,
-    eventRetention,
-    reconnectBaseMs,
-    reconnectMaxMs,
-    fullHistoryOnReconnect,
-  } = config;
+  let webhookTimeoutMs = config.webhookTimeoutMs;
+  let webhookMaxRetries = config.webhookMaxRetries;
+  let webhookRetryBaseMs = config.webhookRetryBaseMs;
+  let webhookRetryMaxMs = config.webhookRetryMaxMs;
+  let eventRetention = config.eventRetention;
+  let reconnectBaseMs = config.reconnectBaseMs;
+  let reconnectMaxMs = config.reconnectMaxMs;
+  let fullHistoryOnReconnect = config.fullHistoryOnReconnect;
 
   const webhook = makeWebhookDispatcher(
-    { targets: webhookTargets || [], webhookTimeoutMs, webhookMaxRetries, webhookRetryBaseMs, webhookRetryMaxMs },
+    { targets: config.webhookTargets || [], webhookTimeoutMs, webhookMaxRetries, webhookRetryBaseMs, webhookRetryMaxMs },
     log,
     db,
     phoneNumber
@@ -517,6 +518,21 @@ function createWhatsAppService({ phoneNumber, config, log }) {
       const targets = await db.getWebhookTargets(phoneNumber);
       webhook.setTargets(targets);
       return targets;
+    },
+
+    reloadConfig(newConfig) {
+      if (newConfig.eventRetention !== undefined) eventRetention = newConfig.eventRetention;
+      if (newConfig.reconnectBaseMs !== undefined) reconnectBaseMs = newConfig.reconnectBaseMs;
+      if (newConfig.reconnectMaxMs !== undefined) reconnectMaxMs = newConfig.reconnectMaxMs;
+      if (newConfig.fullHistoryOnReconnect !== undefined) fullHistoryOnReconnect = newConfig.fullHistoryOnReconnect;
+      if (newConfig.webhookTargets !== undefined) webhook.setTargets(newConfig.webhookTargets);
+      webhook.setDispatcherConfig({
+        webhookTimeoutMs: newConfig.webhookTimeoutMs,
+        webhookMaxRetries: newConfig.webhookMaxRetries,
+        webhookRetryBaseMs: newConfig.webhookRetryBaseMs,
+        webhookRetryMaxMs: newConfig.webhookRetryMaxMs,
+      });
+      log('Config reloaded from database');
     },
 
     async stop() {

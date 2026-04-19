@@ -61,6 +61,25 @@ app.use((req, res, next) => {
 
 // whatsapp service instance — initialised in start()
 let whatsapp = null;
+let configPollTimer = null;
+
+const CONFIG_POLL_INTERVAL_MS = 60_000;
+
+async function reloadConfigFromDb() {
+  const numberConfig = await db.getNumberConfig(WHATSAPP_NUMBER);
+  const webhookTargets = await db.getWebhookTargets(WHATSAPP_NUMBER);
+  whatsapp.reloadConfig({
+    webhookTargets,
+    webhookTimeoutMs:       numberConfig.webhook_timeout_ms,
+    webhookMaxRetries:      numberConfig.webhook_max_retries,
+    webhookRetryBaseMs:     numberConfig.webhook_retry_base_ms,
+    webhookRetryMaxMs:      numberConfig.webhook_retry_max_ms,
+    eventRetention:         numberConfig.event_retention,
+    reconnectBaseMs:        numberConfig.reconnect_base_ms,
+    reconnectMaxMs:         numberConfig.reconnect_max_ms,
+    fullHistoryOnReconnect: Boolean(numberConfig.full_history_on_reconnect),
+  });
+}
 
 app.get('/health', async (req, res) => {
   const state = whatsapp.getState();
@@ -218,6 +237,15 @@ app.delete('/webhook-targets/:id', async (req, res, next) => {
     }
     await whatsapp.reloadWebhookTargets();
     res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/config/reload', async (req, res, next) => {
+  try {
+    await reloadConfigFromDb();
+    res.json({ ok: true, message: 'Config reloaded from database.' });
   } catch (error) {
     next(error);
   }
@@ -425,6 +453,15 @@ async function start() {
   whatsapp = createWhatsAppService({ phoneNumber: WHATSAPP_NUMBER, config, log });
   await whatsapp.start();
 
+  configPollTimer = setInterval(async () => {
+    try {
+      await reloadConfigFromDb();
+    } catch (error) {
+      log('Config poll failed', { error: error.message });
+    }
+  }, CONFIG_POLL_INTERVAL_MS);
+  configPollTimer.unref();
+
   app.listen(PORT, HOST, () => {
     log(`HTTP server listening on ${HOST}:${PORT}`);
   });
@@ -436,6 +473,10 @@ start().catch((error) => {
 });
 
 async function shutdown() {
+  if (configPollTimer) {
+    clearInterval(configPollTimer);
+    configPollTimer = null;
+  }
   if (whatsapp) await whatsapp.stop();
   await db.closePool();
 }
